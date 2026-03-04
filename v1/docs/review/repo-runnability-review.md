@@ -175,3 +175,193 @@ ADR-027 在当前仓库里是“**部分模块已落地，但训练/推理主链
 - **训练**：当前只能判定“有相应模块原型/组件”，不能判定“已在正式训练闭环中实现并达标”。
 - **推理**：当前也不能判定“已完成几何条件 zero-shot 推理 + 跨硬件域泛化”的生产级闭环。
 - **总体**：**功能方向正确、代码储备存在，但尚未达到 ADR-027 描述的可验证完成态**。
+
+---
+
+## 附录：ADR 逻辑关系与“可运行性分层”专项（第一条主线）
+
+> 本轮我先沿一条核心主线做深挖：`ADR-016 → ADR-017 → ADR-023 → ADR-024 → ADR-027 → ADR-031 → ADR-033`。
+
+### A. 这条主线的逻辑依赖（文档层）
+
+1. **ADR-016（Accepted）**：把 ruvector 能力引入训练栈，作为后续智能模块基础。
+2. **ADR-017（Accepted）**：把 ruvector 从训练扩展到 signal / MAT 生产算法。
+3. **ADR-023（Proposed）**：在“感知可用”基础上，推进“可训练 DensePose 模型”主链路。
+4. **ADR-024（Proposed）**：在 ADR-023 基座上增加 AETHER 对比学习嵌入。
+5. **ADR-027（Proposed）**：进一步做跨环境域泛化（MERIDIAN）。
+6. **ADR-031（Proposed）**：再往上叠加多视角融合（RuView）。
+7. **ADR-033（Proposed）**：最上层 CRV-Sense 统一抽象与跨阶段编码。
+
+这条链条在文档上是“逐层叠加”的；越往后越依赖前面模块已经稳定落地。
+
+### B. 代码层现实：哪些是“可部分运行”，哪些“接不起来”
+
+#### B1. 可部分运行（模块级可证）
+
+- **ADR-016 基础依赖到位**：`wifi-densepose-train` 已声明并使用多项 ruvector 依赖。
+- **ADR-017 大量点状接入存在**：`wifi-densepose-signal`/`wifi-densepose-mat` 能看到 mincut、attn-mincut、solver、temporal-tensor 等真实调用路径。
+- **ADR-031/033 的基础模块存在**：`wifi-densepose-ruvector` 下 `viewpoint/`、`crv/` 目录及代码均已存在，可单独编译检查通过。
+
+#### B2. 难以判定可运行 / 容易“模块接不起来”
+
+- **ADR-023/024/027 训练-推理闭环仍不稳**：
+  - `train` 二进制未开 `tch-backend` 时不会真正训练，只是管线校验提示；
+  - `sensing-server` 当前并不依赖 `wifi-densepose-train` / `wifi-densepose-signal` / `wifi-densepose-ruvector`，说明很多高级训练与融合模块尚未进入线上主运行路径；
+  - `sensing-server` 中仍有大量启发式与 synthetic fallback（包括 `derive_pose_from_sensing`、模拟数据任务、synthetic 训练样本兜底、placeholder 权重等），与“完整训练模型在线推理”叙事存在差距。
+
+### C. ADR 与“不同版本代码”之间的关系
+
+1. **Python v1 仍是 legacy**，而 ADR 主体叙事已经明显偏 Rust 多 crate 架构。
+2. **Rust 内部也有“双轨”**：
+   - 一条是 `wifi-densepose-train`（偏离线训练与数据管线）；
+   - 一条是 `wifi-densepose-sensing-server`（当前在线服务主入口）。
+3. 目前看起来很多 ADR 的“实现落点”分散在不同 crate，**但线上入口并未全部消费这些实现**，所以会出现“模块都在、故事很全、端到端却不一定打通”的观感。
+
+### D. 阶段性判断（这一条主线）
+
+- **可判定“部分可运行”**：ADR-016、ADR-017 相关的底层算法接入与部分 crate 编译/单测。
+- **可判定“未形成稳定闭环”**：ADR-023、ADR-024、ADR-027、ADR-031、ADR-033 的端到端训练+推理联合目标。
+- **下一步建议**：做“ADR 闭环清单”——每个 ADR 要有唯一可执行入口命令 + 最小验收样例 + CI 证明，否则默认视为“设计已写、系统未闭环”。
+
+---
+
+## 附录：子系统关系图（运行时视角）与“文档过度承诺”清单
+
+### 1) 运行时子系统关系图（当前可观察事实）
+
+```mermaid
+flowchart TD
+    A[用户入口: README / Makefile / Docker] --> B{启动路径}
+
+    B -->|Python legacy| P1[v1/src API 服务]
+    B -->|Rust 主线| R1[sensing-server 二进制]
+    B -->|验证| V1[./verify + v1/data/proof]
+
+    %% Python line
+    P1 --> P2[v1/src/core + services + api]
+    P2 --> P3[(Python依赖/环境变量/.env)]
+
+    %% Rust runtime line
+    R1 --> R2[wifi-densepose-wifiscan]
+    R1 --> R3[启发式姿态 derive_pose_from_sensing]
+    R1 --> R4[模拟数据 fallback]
+    R1 -.部分训练接口.-> R5[sensing-server 内置 trainer/training_api]
+
+    %% Rust offline/training ecosystem
+    T1[wifi-densepose-train crate] --> T2[wifi-densepose-signal crate]
+    T1 --> T3[wifi-densepose-nn crate]
+    T1 --> T4[ruvector* 生态依赖]
+    T1 --> T5[tch-backend 特性门控]
+
+    %% advanced modules not clearly wired to runtime
+    X1[wifi-densepose-ruvector: viewpoint/crv] --> X2[可编译模块]
+    X2 -.未见主入口直接依赖.-> R1
+
+    %% verification line
+    V1 --> V2[哈希比对]
+    V2 -->|当前环境| V3[FAIL: hash mismatch]
+
+    %% style
+    classDef risk fill:#ffe6e6,stroke:#d33,stroke-width:1px;
+    class R3,R4,V3 risk;
+```
+
+### 2) 一眼看懂：哪些“文档很强”，但当前代码难以兑现
+
+> 下面不是否定“有代码”，而是强调**是否形成默认可运行闭环**。
+
+#### A. 高风险（文档叙事强，但默认路径难以兑现）
+
+1. **“训练模型驱动的端到端姿态推理”**
+   - 现实：线上 `sensing-server` 仍有明显启发式姿态推导路径（`derive_pose_from_sensing`）。
+   - 现实：还有模拟数据自动回退与 synthetic 训练样本回退。
+   - 结论：默认运行更像“感知+启发式可视化”，不是严格意义上的“已训练模型全闭环在线推理”。
+
+2. **“自监督/域泛化/多视角融合已完整上线”**（ADR-024/027/031/033 风格）
+   - 现实：相关模块代码多数存在，但主入口依赖链并未完全消费这些高级模块。
+   - 现实：`train` 路径受 `tch-backend` 特性与环境依赖影响，默认不等于可训练闭环。
+   - 结论：可称“研发中/模块化储备”，不宜在对外叙事中当作“默认已跑通能力”。
+
+3. **“可复现可信验证”**
+   - 现实：`./verify` 在当前环境直接 FAIL（哈希不匹配）。
+   - 结论：除非固定依赖与运行环境，否则“任何人一键复现 PASS”尚不能成立。
+
+#### B. 中风险（可部分运行，但有条件）
+
+1. **Rust 多 crate 算法模块（signal/mat/ruvector）**
+   - 现实：不少 crate/模块可编译，且可看到真实算法接入。
+   - 但：并不自动等于“被线上服务主路径全部调用”。
+
+2. **Python v1 API 线**
+   - 现实：目录结构完整、功能面广。
+   - 但：入口路径、依赖与配置闭环问题会阻断新用户首跑。
+
+### 3) 推荐对外表述（防止“天花乱坠”反噬）
+
+建议把功能声明改成三层：
+
+- **Layer 1（默认可运行）**：给出唯一命令 + 期望输出 + CI 证据。
+- **Layer 2（模块可运行）**：说明“可单测/可编译，但未接入默认主路径”。
+- **Layer 3（ADR 提案）**：明确“设计目标 / 进行中”，避免写成“现网能力”。
+
+这样既不贬低已做工作，也能显著降低“文档过度承诺”的信任损耗。
+
+---
+
+## 附录：ADR 依赖关系继续深挖（第二阶段）——哪些能跑，哪些接不起来
+
+### 1) 依赖关系主干（按“从底层到上层能力”）
+
+可以把当前 ADR 粗分为 4 层：
+
+1. **底层工程与算法层**：ADR-014/015/016/017/019/020
+2. **平台能力层（部分实现）**：ADR-021/022/028/032/034
+3. **高级智能层（大多 Proposed）**：ADR-023/024/025/027/029/030/031/033/038/039
+4. **治理与可信层**：ADR-010/011 等（更多是流程与质量要求）
+
+核心规律：越往上层，越依赖下层“主链路已接线”；当前仓库的主要问题是“上层模块存在，但未形成默认运行闭环”。
+
+### 2) ADR 分层可运行性矩阵（基于当前代码关系图）
+
+| ADR | 文档状态 | 代码现实 | 运行判定 |
+|---|---|---|---|
+| ADR-015 公开数据训练策略 | Accepted | train crate 架构完整，但真实训练受 feature / 环境约束 | **部分可运行** |
+| ADR-016 RuVector 训练集成 | Accepted | train crate 明确声明并使用 ruvector 依赖 | **模块可运行** |
+| ADR-017 Signal+MAT 集成 | Accepted | signal/mat 中可见多处 ruvector 接入点 | **模块可运行** |
+| ADR-019 纯感知 UI 模式 | Accepted | sensing-server 可独立编译，具备在线服务入口 | **可运行（但能力保守）** |
+| ADR-020 Rust 迁移 | Accepted | Rust workspace 为主线，crate 生态完整 | **可运行（工程层）** |
+| ADR-021 生命体征 | Partially Implemented | 有 vitals/相关模块，但并非都在主入口强依赖 | **部分可运行** |
+| ADR-022 Windows WiFi 增强 | Partially Implemented | wifiscan 有 netsh/wlanapi 适配器与大量解析测试 | **部分可运行（平台条件依赖）** |
+| ADR-023 训练DensePose主链路 | Proposed | 文档目标高，但线上仍有启发式姿态路径 | **闭环不足** |
+| ADR-024 AETHER对比学习 | Proposed | 模块存在于 sensing-server/train 侧，但线上默认链路未完全消费 | **闭环不足** |
+| ADR-027 MERIDIAN 域泛化 | Proposed | 组件存在（domain/geometry/rapid_adapt 等），主训练推理链未证实打通 | **闭环不足** |
+| ADR-029/030 RuvSense 多静态+场模型 | Proposed | signal/ruvsense 模块丰富，但主入口耦合证据不足 | **高风险（接线不清）** |
+| ADR-031 RuView 融合 | Proposed | ruvector/viewpoint 模块存在，可编译；主运行时未见强耦合 | **高风险（模块孤岛）** |
+| ADR-033 CRV-Sense | Proposed | ruvector/crv 模块存在，可编译；与线上默认流程关系弱 | **高风险（模块孤岛）** |
+| ADR-038/039 规划与边缘智能 | Proposed | 目标叙事强，缺少可执行主入口证据 | **高风险（文档先行）** |
+
+### 3) “跑不起来/接不起来”的共性模式
+
+1. **入口分裂**：Python legacy 与 Rust 主线并存，且 Rust 内部还有 online/offline 双轨。
+2. **主路径未消费高级模块**：很多 ADR 对应模块可编译，但默认入口并不调用。
+3. **feature 与环境门控过强**：不开特性就不训练，开特性又可能被外部依赖阻断。
+4. **fallback 掩盖真实能力边界**：启发式/模拟数据让系统“看起来在跑”，但不是目标能力闭环。
+
+### 4) 目前最容易“文档吹大于实现”的 ADR 组
+
+- **ADR-023/024/027**（训练、对比学习、域泛化）
+- **ADR-029/030/031/033**（多视角/持久场/CRV高阶融合）
+- **ADR-038/039**（规划与边缘智能愿景）
+
+这些 ADR 并不是“没有代码”，而是**还缺少“默认入口可执行 + 指标可复现 + CI 可证明”的三件套**。
+
+### 5) 下一步建议（按你当前审计目标）
+
+建议后续每个 ADR 都补一张“闭环卡片”：
+
+- `Entry`: 唯一执行命令（本地/容器）
+- `Input`: 最小真实样本/数据源
+- `Output`: 期望结构与关键指标
+- `Proof`: CI Job 链接或日志文件
+
+没有这张卡片的 ADR，默认归类为“设计已写、实现待闭环”。
